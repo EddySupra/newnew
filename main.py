@@ -15,7 +15,7 @@ import gspread
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
 SERVICE_ACCOUNT_FILE = "service_account.json"
-SPREADSHEET_ID = "1baMJ0sLCQphUdZzETLsqcYOqlgK5P5WK4bRCiP1WLjA"
+SPREADSHEET_ID = "1tXA9LKaQWmE97NsR29U6MyPtJA5qylZvHXMZPVa38oo"
 WORKSHEET_NAME = "Sheet1"
 
 STATUS_COL = 11   # K
@@ -622,6 +622,32 @@ def wait_for_page_advance(driver, before_url, timeout=8):
 
     WebDriverWait(driver, timeout).until(_advanced)
 
+def wait_for_captcha_solved(driver, timeout=120):
+    print("Waiting for captcha...")
+
+    # capture existing token (important)
+    initial_token = driver.execute_script("""
+        const el = document.getElementById('g-recaptcha-response');
+        return el ? el.value : '';
+    """)
+
+    def new_token(d):
+        try:
+            return d.execute_script("""
+                const el = document.getElementById('g-recaptcha-response');
+                if (!el) return false;
+
+                const val = el.value.trim();
+                return val.length > 0 && val !== arguments[0];
+            """, initial_token)
+        except:
+            return False
+
+    WebDriverWait(driver, timeout).until(new_token)
+
+    time.sleep(random.uniform(2, 4))  # let site process captcha
+
+    print("Captcha completed and accepted.")
 
 def wait_for_page_advance_after_gov_program(driver, before_url, timeout=8):
     def _advanced(d):
@@ -811,7 +837,7 @@ def wait_for_progress_or_force_recover(driver, timeout=20):
         try:
             print(f"Forced refresh {attempt+1}...")
             driver.refresh()
-            wait_for_dom_ready(driver, timeout=30)
+            wait_for_dom_ready(driver, timeout=20)
             time.sleep(random.uniform(1.5, 3.0))
         except Exception as e:
             print(f"Refresh error: {e}")
@@ -827,6 +853,29 @@ def update_status(sheet, row_number, status, note=""):
         sheet.update_cell(row_number, NOTE_COL, note)
     except Exception as e:
         print(f"Could not update status for row {row_number}: {e}")
+
+def classify_submission_result(driver):
+    try:
+        body_text = driver.execute_script(
+            "return document.body.innerText.toLowerCase();"
+        )
+
+        if "approved" in body_text:
+            return "APPROVED", "Application approved"
+
+        elif "pending" in body_text or "under review" in body_text:
+            return "PENDING", "Under review"
+
+        elif "rejected" in body_text or "not eligible" in body_text:
+            return "REJECTED", "Not eligible"
+
+        elif "application submitted" in body_text:
+            return "SUBMITTED", "Submission confirmed"
+
+        return "UNKNOWN", "No clear result detected"
+
+    except Exception as e:
+        return "ERROR", f"Classifier failed: {str(e)[:100]}"
 
 
 def should_skip_row(row):
@@ -1116,12 +1165,17 @@ def fill_form_from_row(driver, row):
     # ----------------------------
     # Agreement checkbox
     # ----------------------------
+    wait_for_captcha_solved(driver, timeout=120)
+
+    print("Captcha completed, continuing...")
+
     human_behavior()
-    time.sleep(random.uniform(8.4, 10.9))
+    time.sleep(random.uniform(4,6))
+    driver.execute_script("window.scrollBy(0, 200);")
     click_checkbox_like_human(driver, "span.indi-form__checkbox-icon", timeout=20)
 
     # simulate reading terms
-    time.sleep(random.uniform(3.0, 6.5))
+    time.sleep(random.uniform(4.5,8.9))
 
     # ----------------------------
     # Submit
@@ -1134,15 +1188,19 @@ def fill_form_from_row(driver, row):
         return False, "Loading stuck → recovered"
 
     # post-submit idle (user waiting / reading)
-    time.sleep(random.uniform(4.0, 8.0))
+
 
     # ----------------------------
     # Navigate back to homepage
     # ----------------------------
     open_account_homepage(driver)
 
-    return True, "Completed with humanized flow"
+    time.sleep(random.uniform(4,6))
 
+
+    status, note = classify_submission_result(driver)
+
+    return True, (status, note)
 
 # ----------------------------
 # Orchestrator
@@ -1175,18 +1233,34 @@ def process_rows():
                 if should_skip_row(row):
                     print(f"Skipping row {row_number}")
                     continue
+                try:
+                    print("Resetting page state for new lead...")
+                    driver.refresh()
+                    wait_for_dom_ready(driver, timeout=30)
+                    time.sleep(random.uniform(2, 4))
 
+                    # clear any stale captcha token
+                    driver.execute_script("""
+                        const el = document.getElementById('g-recaptcha-response');
+                        if (el) el.value = '';
+                    """)
+
+                except Exception as e:
+                    print(f"Reset error: {e}")
+                
                 print(f"Processing row {row_number}: {row['First Name']} {row['Last Name']}")
 
                 try:
-                    ok, note = fill_form_from_row(driver, row)
-
+                    ok, result = fill_form_from_row(driver, row)
+                    
                     if ok:
-                        update_status(sheet, row_number, "DONE", note)
-                        print(f"Row {row_number} completed")
+                        status, note = result
+                        update_status(sheet, row_number, status, note)
+                        print(f"Row {row_number} completed → {status}")
+
                     else:
-                        update_status(sheet, row_number, "FAILED", note)
-                        print(f"Row {row_number} failed: {note}")
+                        update_status(sheet, row_number, "FAILED", result)
+                        print(f"Row {row_number} failed: {result}")
 
                         try:
                             recover_to_homepage(driver)
@@ -1203,7 +1277,7 @@ def process_rows():
                     except Exception as rec_err:
                         print(f"Recovery failed after exception: {rec_err}")
 
-                wait_before_next_lead(20, 50)
+                wait_before_next_lead(10, 20)
 
         finally:
             try:
@@ -1214,4 +1288,5 @@ def process_rows():
 
 if __name__ == "__main__":
     process_rows()
+
 
