@@ -15,7 +15,7 @@ import gspread
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
 SERVICE_ACCOUNT_FILE = "service_account.json"
-SPREADSHEET_ID = "1tXA9LKaQWmE97NsR29U6MyPtJA5qylZvHXMZPVa38oo"
+SPREADSHEET_ID = "1baMJ0sLCQphUdZzETLsqcYOqlgK5P5WK4bRCiP1WLjA"
 WORKSHEET_NAME = "Sheet1"
 
 STATUS_COL = 11   # K
