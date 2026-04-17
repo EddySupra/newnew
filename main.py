@@ -15,7 +15,7 @@ import gspread
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
 SERVICE_ACCOUNT_FILE = "service_account.json"
-SPREADSHEET_ID = "1baMJ0sLCQphUdZzETLsqcYOqlgK5P5WK4bRCiP1WLjA"
+SPREADSHEET_ID = "1tXA9LKaQWmE97NsR29U6MyPtJA5qylZvHXMZPVa38oo"
 WORKSHEET_NAME = "Sheet1"
 
 STATUS_COL = 11   # K
@@ -742,9 +742,84 @@ def open_account_homepage(driver, timeout=15):
         return False
 
 
+def recover_to_homepage(driver):
+    print("Recovery: refreshing page...")
+    try:
+        driver.refresh()
+    except Exception:
+        print("Refresh hit timeout, continuing...")
+
+    wait_for_dom_ready(driver, timeout=30)
+
+    wait_for_dom_ready(driver, timeout=30)
+    random_pause(1.5, 3.0)
+
+    print("Recovery: opening My account dropdown...")
+    wait_clickable_css(driver, "button[data-target='#SPCollapse']", timeout=30).click()
+
+    random_pause(0.8, 1.6)
+
+    print("Recovery: clicking Account homepage...")
+    wait_clickable_xpath(
+        driver,
+        "//a[contains(text(), 'Account homepage')]",
+        timeout=30
+    ).click()
+
+    wait_for_dom_ready(driver, timeout=30)
+    random_pause(1.5, 3.0)
+
+    print("Recovery: closing My account dropdown...")
+    wait_clickable_css(driver, "button[data-target='#SPCollapse']", timeout=30).click()
+
+    print("Recovery: waiting before next lead...")
+    random_pause(20, 60)
+
 # ----------------------------
 # Data helpers
 # ----------------------------
+
+def wait_for_progress_or_force_recover(driver, timeout=20):
+    print("Waiting for page progress (strict timeout)...")
+
+    start = time.time()
+    initial_marker = driver.execute_script(
+        "return document.body.innerText.slice(0, 500);"
+    )
+
+    while time.time() - start < timeout:
+        try:
+            current_marker = driver.execute_script(
+                "return document.body.innerText.slice(0, 500);"
+            )
+
+            if current_marker != initial_marker:
+                print("Page progressed successfully.")
+                return True
+
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+
+    # ⛔ HARD TIMEOUT → ALWAYS RECOVER
+    print("Hard timeout reached. Forcing recovery...")
+
+    refresh_attempts = random.randint(1, 3)
+
+    for attempt in range(refresh_attempts):
+        try:
+            print(f"Forced refresh {attempt+1}...")
+            driver.refresh()
+            wait_for_dom_ready(driver, timeout=30)
+            time.sleep(random.uniform(1.5, 3.0))
+        except Exception as e:
+            print(f"Refresh error: {e}")
+
+    print("Navigating back to homepage after forced refresh...")
+    recover_to_homepage(driver)
+
+    return False
 
 def update_status(sheet, row_number, status, note=""):
     try:
@@ -796,6 +871,68 @@ def split_dob(dob_value):
 
     return month, day, year
 
+import time
+import random
+from selenium.common.exceptions import StaleElementReferenceException
+
+def wait_for_loader_or_timeout(driver, timeout=20):
+    print("Watching for Loading screen...")
+
+    start = time.time()
+    loading_seen = False
+    last_seen_time = None
+
+    while time.time() - start < timeout:
+        try:
+            loading_elements = driver.find_elements(
+                By.XPATH,
+                "//*[contains(text(), 'Loading')]"
+            )
+
+            visible_loading = any(el.is_displayed() for el in loading_elements)
+
+            if visible_loading:
+                if not loading_seen:
+                    print("Loading screen detected...")
+                    loading_seen = True
+
+                last_seen_time = time.time()
+
+            else:
+                if loading_seen:
+                    # loader appeared AND disappeared → success
+                    print("Loading finished normally.")
+                    return True
+
+        except StaleElementReferenceException:
+            pass
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+
+    # ⛔ TIMEOUT → STUCK LOADING
+    print("Loading stuck > timeout. Forcing recovery...")
+
+    refresh_attempts = random.randint(1, 3)
+
+    for i in range(refresh_attempts):
+        try:
+            print(f"Refresh attempt {i+1}")
+
+            try:
+                driver.refresh()
+            except Exception:
+                print("Refresh timeout, continuing...")
+
+            wait_for_dom_ready(driver, timeout=30)
+            random_pause(1.5, 3.0)
+
+        except Exception as e:
+            print(f"Refresh error: {e}")
+
+    recover_to_homepage(driver)
+    return False
 
 # ----------------------------
 # Main row processor
@@ -804,14 +941,67 @@ def split_dob(dob_value):
 def fill_form_from_row(driver, row):
     wait_for_dom_ready(driver, timeout=30)
 
+    def human_behavior():
+        # small idle / scroll / thinking behavior
+        if random.random() < 0.25:
+            driver.execute_script(
+                "window.scrollBy(0, arguments[0]);",
+                random.randint(-150, 150)
+            )
+        if random.random() < 0.30:
+            time.sleep(random.uniform(0.4, 1.6))
+
+    def maybe_retype(css, value):
+        if random.random() < 0.12:
+            elem = wait_visible_css(driver, css)
+            human_focus_element(driver, elem)
+            human_clear_element(elem)
+            human_type_element(elem, value)
+
+    def human_type(css, value, use_mouse=False):
+        strong_type_css_human_first(
+            driver,
+            css,
+            value,
+            timeout=30,
+            use_real_mouse=use_mouse
+        )
+        if random.random() < 0.25:
+            time.sleep(random.uniform(0.3, 1.2))  # thinking pause
+        maybe_retype(css, value)
+
+    def human_click(css):
+        elem = wait_clickable_css(driver, css, timeout=30)
+
+        # hesitation click
+        if random.random() < 0.15:
+            human_hover_and_click(driver, elem)
+            time.sleep(random.uniform(0.2, 0.6))
+
+        click_element_hybrid(
+            driver,
+            element=elem,
+            use_real_mouse=(random.random() < 0.3)
+        )
+
+        if random.random() < 0.3:
+            time.sleep(random.uniform(0.5, 1.5))
+
+    # ----------------------------
+    # Start application
+    # ----------------------------
     safe_action_click_xpath_with_fallback(
         driver,
         "//a[@ng-click=\"c.startNewApplication('lifeline')\" and contains(normalize-space(), 'Start Lifeline Application')]",
         timeout=30
     )
-    random_pause(0.90, 1.80)
+
+    random_pause(1.0, 2.5)
     wait_for_dom_ready(driver, timeout=30)
 
+    # ----------------------------
+    # Prepare data
+    # ----------------------------
     first_name = row.get("First Name", "").strip()
     last_name = row.get("Last Name", "").strip()
     dob_raw = row.get("DOB", "").strip()
@@ -824,113 +1014,134 @@ def fill_form_from_row(driver, row):
 
     dob_month, dob_day, dob_year = split_dob(dob_raw)
 
-    print("Typing first name...")
-    strong_type_css_human_first(driver, "#firstName", first_name, timeout=30, use_real_mouse=True)
+    # ----------------------------
+    # Name (slightly randomized order)
+    # ----------------------------
+    name_fields = [
+        ("#firstName", first_name),
+        ("#lastName", last_name),
+    ]
+    random.shuffle(name_fields)
 
-    print("Typing last name...")
-    strong_type_css_human_first(driver, "#lastName", last_name, timeout=30, use_real_mouse=False)
+    for css, value in name_fields:
+        human_type(css, value, use_mouse=(random.random() < 0.4))
+        human_behavior()
 
-    print("Typing DOB month...")
-    strong_type_css_human_first(driver, "#dobMonth", dob_month, timeout=30, use_real_mouse=False)
+    # ----------------------------
+    # DOB (sometimes pause between fields)
+    # ----------------------------
+    human_type("#dobMonth", dob_month)
+    if random.random() < 0.3:
+        time.sleep(random.uniform(0.5, 1.5))
 
-    print("Typing DOB day...")
-    strong_type_css_human_first(driver, "#dobDay", dob_day, timeout=30, use_real_mouse=False)
+    human_type("#dobDay", dob_day)
+    human_type("#dobYear", dob_year)
 
-    print("Typing DOB year...")
-    strong_type_css_human_first(driver, "#dobYear", dob_year, timeout=30, use_real_mouse=False)
+    human_behavior()
 
-    print("Typing SSN4...")
-    strong_type_css_human_first(driver, "#ssnText", ssn4, timeout=30, use_real_mouse=False)
+    # ----------------------------
+    # SSN
+    # ----------------------------
+    human_type("#ssnText", ssn4)
 
-    print("Typing address1...")
-    strong_type_css_human_first(driver, "#streetNumberName", address1, timeout=30, use_real_mouse=True)
+    # ----------------------------
+    # Address block (more "careful" behavior)
+    # ----------------------------
+    human_type("#streetNumberName", address1, use_mouse=True)
 
     if address2:
-        print("Typing address2...")
-        strong_type_css_human_first(driver, "#apt", address2, timeout=30, use_real_mouse=False)
+        if random.random() < 0.6:  # sometimes skip then come back
+            human_type("#apt", address2)
 
-    print("Typing city...")
-    strong_type_css_human_first(driver, "#city", city, timeout=30, use_real_mouse=False)
+    human_behavior()
 
-    print("Selecting state...")
-    strong_select_state(driver, state, timeout=30, use_real_mouse=True)
+    human_type("#city", city)
 
-    print("Typing zip...")
-    strong_type_css_human_first(driver, "#zipcode", zip_code, timeout=30, use_real_mouse=False)
+    # State selection (humans pause here often)
+    if random.random() < 0.5:
+        time.sleep(random.uniform(0.6, 2.0))
 
-    random_pause(0.70, 1.40)
+    strong_select_state(
+        driver,
+        state,
+        timeout=30,
+        use_real_mouse=(random.random() < 0.4)
+    )
 
-    print("Rendered ZIP value:", get_rendered_value(driver, "#zipcode"))
-    print("Rendered button text:", get_rendered_text(driver, "#serviceProviderNextButton"))
+    human_type("#zipcode", zip_code)
 
-    print("Checking for invalid fields before clicking Next...")
+    # occasional correction behavior
+    if random.random() < 0.15:
+        human_type("#zipcode", zip_code)
+
+    human_behavior()
+
+    # ----------------------------
+    # Pre-submit hesitation
+    # ----------------------------
+    if random.random() < 0.4:
+        time.sleep(random.uniform(1.5, 3.5))
+
+    print("Checking for invalid fields...")
     print_invalid_fields(driver)
 
-    print("Waiting for service provider Next to become enabled...")
     wait_until_service_provider_next_enabled(driver, timeout=10)
 
-    next_btn = wait_clickable_css(driver, "#serviceProviderNextButton", timeout=30)
     before_url = driver.current_url
 
-    print("Clicking service provider Next...")
-    clicked = False
+    print("Clicking first Next...")
+    human_click("#serviceProviderNextButton")
 
     try:
-        click_element_hybrid(driver, element=next_btn, use_real_mouse=True)
-        clicked = True
-    except Exception:
-        try:
-            clicked = click_in_browser_js(driver, "#serviceProviderNextButton")
-        except Exception:
-            clicked = False
-
-    if not clicked:
-        driver.execute_script(
-            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
-            next_btn
-        )
-        random_pause(0.18, 0.40)
-        driver.execute_script("arguments[0].click();", next_btn)
-
-    random_pause(0.90, 1.90)
-
-    try:
-        print("Waiting for page to actually advance...")
         wait_for_page_advance(driver, before_url, timeout=8)
     except TimeoutException:
         debug_post_click_state(driver, before_url)
-        try:
-            rendered_html = get_rendered_html(driver)
-            print("Rendered HTML preview:")
-            print(rendered_html[:3000])
-        except Exception:
-            print("Could not capture rendered HTML")
-        return False, "Clicked first Next but page did not advance"
+        return False, "Next click did not advance"
 
-    print("Clicking SNAP checkbox...")
+    # ----------------------------
+    # SNAP checkbox (with reading delay)
+    # ----------------------------
+    human_behavior()
     click_checkbox_like_human(driver, "#eligSnapSpan", timeout=20)
 
-    random_pause(0.70, 1.40)
+    # simulate reading eligibility text
+    time.sleep(random.uniform(1.5, 3.5))
 
-    print("Waiting for gov program Next to become enabled...")
-    gov_ok = click_gov_program_next(driver, timeout=20)
-    if not gov_ok:
-        return False, "Clicked SNAP but gov program Next did not advance"
+    # ----------------------------
+    # Gov program Next
+    # ----------------------------
+    if not click_gov_program_next(driver, timeout=20):
+        return False, "Gov program next failed"
 
-    print("Clicking agreement checkbox...")
+    # ----------------------------
+    # Agreement checkbox
+    # ----------------------------
+    human_behavior()
+    time.sleep(random.uniform(8.4, 10.9))
     click_checkbox_like_human(driver, "span.indi-form__checkbox-icon", timeout=20)
 
-    random_pause(12.5, 16.8)
+    # simulate reading terms
+    time.sleep(random.uniform(3.0, 6.5))
 
-    print("Clicking submit...")
-    click_primary_button_like_human(driver, "#nextSuccessButton9", timeout=20)
+    # ----------------------------
+    # Submit
+    # ----------------------------
+    human_click("#nextSuccessButton9")
 
-    random_pause(4.0, 9.0)
+    # loading watchdog
+    ok = wait_for_loader_or_timeout(driver, timeout=20)
+    if not ok:
+        return False, "Loading stuck → recovered"
 
-    print("Opening account homepage...")
+    # post-submit idle (user waiting / reading)
+    time.sleep(random.uniform(4.0, 8.0))
+
+    # ----------------------------
+    # Navigate back to homepage
+    # ----------------------------
     open_account_homepage(driver)
 
-    return True, "Advanced through SNAP and gov program Next successfully"
+    return True, "Completed with humanized flow"
 
 
 # ----------------------------
@@ -945,11 +1156,13 @@ def process_rows():
     with SB(
         uc=True,
         test=True,
-        incognito=True,
+        incognito=False,
         agent=USER_AGENT,
         maximize=True
     ) as sb:
         driver = sb.driver
+
+        driver.set_page_load_timeout(25)
 
         try:
             print("Chrome is open in SeleniumBase UC mode.")
@@ -968,19 +1181,29 @@ def process_rows():
                 try:
                     ok, note = fill_form_from_row(driver, row)
 
-                    if ok 
+                    if ok:
                         update_status(sheet, row_number, "DONE", note)
                         print(f"Row {row_number} completed")
                     else:
                         update_status(sheet, row_number, "FAILED", note)
                         print(f"Row {row_number} failed: {note}")
 
+                        try:
+                            recover_to_homepage(driver)
+                        except Exception as e:
+                            print(f"Recovery failed: {e}")
+
                 except Exception as e:
                     error_msg = f"{type(e).__name__}: {str(e)[:200]}"
                     update_status(sheet, row_number, "ERROR", error_msg)
                     print(f"Row {row_number} error: {error_msg}")
 
-                wait_before_next_lead(60, 120)
+                    try:
+                        recover_to_homepage(driver)
+                    except Exception as rec_err:
+                        print(f"Recovery failed after exception: {rec_err}")
+
+                wait_before_next_lead(20, 50)
 
         finally:
             try:
@@ -991,3 +1214,4 @@ def process_rows():
 
 if __name__ == "__main__":
     process_rows()
+
