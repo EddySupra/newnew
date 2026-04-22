@@ -1,42 +1,48 @@
+"""
+solver.py — Automated Lifeline application filler using SeleniumBase.
+
+Flow per lead:
+  1. Navigate to getinternet.gov application
+  2. Fill personal info form (name, DOB, SSN4, address)
+  3. Solve reCAPTCHA (audio fallback via speech recognition)
+  4. Create an account (username derived from email)
+  5. Check eligibility (SNAP checkbox)
+  6. Agree to terms and submit
+  7. Sign out and wait before the next lead
+"""
+
+# Standard library
+import asyncio
+import os
+import random
+import time
+
+# Third-party
+import aiohttp
+import gspread
+import speech_recognition as sr
+from google.oauth2.service_account import Credentials
+from pydub import AudioSegment
 from seleniumbase import SB
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
-from google.oauth2.service_account import Credentials
-import pyautogui
-import random
-import time
-import gspread
-
-import os
-import random
-import asyncio
-import aiohttp
-import time
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
-from pydub import AudioSegment
-import speech_recognition as sr
-from selenium import webdriver
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import (
-    StaleElementReferenceException,
     ElementClickInterceptedException,
-    TimeoutException
+    StaleElementReferenceException,
+    TimeoutException,
 )
+from webdriver_manager.chrome import ChromeDriverManager
 
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
 SERVICE_ACCOUNT_FILE = "service_account.json"
-SPREADSHEET_ID = "1iO8IrRhacrPCJM-HUBTwEgWNXedKiH3VhRycN705akg"
+SPREADSHEET_ID = "1D1jiXfEFb-6IQ3KAl_rG9bnw6TG0DFClkJCpgGbFGJY"
 WORKSHEET_NAME = "Sheet1"
 
 STATUS_COL = 11   # K
@@ -258,7 +264,7 @@ def wait_clickable_xpath(driver, xpath, timeout=20):
     )
 
 def angular_human_type(driver, element, text,
-                       min_delay=0.08, max_delay=0.22,
+                       min_delay=0.05, max_delay=0.14,
                        pause_chance=0.05):
 
     text = str(text)
@@ -274,7 +280,7 @@ def angular_human_type(driver, element, text,
         el.click();
     """, element)
 
-    time.sleep(random.uniform(0.15, 0.3))
+    time.sleep(random.uniform(0.10, 0.20))
 
     # clear in Angular-safe way
     driver.execute_script("""
@@ -295,7 +301,7 @@ def angular_human_type(driver, element, text,
 
         # human hesitation (rare)
         if random.random() < pause_chance:
-            time.sleep(random.uniform(0.4, 1.0))
+            time.sleep(random.uniform(0.25, 0.6))
 
     # finalize Angular model sync
     driver.execute_script("""
@@ -303,7 +309,7 @@ def angular_human_type(driver, element, text,
     """, element)
 
     element.send_keys(Keys.TAB)
-    time.sleep(random.uniform(0.1, 0.25))
+    time.sleep(random.uniform(0.06, 0.16))
 
 # ----------------------------
 # Browser JS helpers
@@ -391,15 +397,46 @@ def wait_for_value(driver, element, expected_value, timeout=5):
 # ----------------------------
 
 
-def human_hover_and_click(driver, element, pre_click_pause=(0.08, 0.25)):
+def simulate_human_mouse_path(driver, element, steps=7):
     driver.execute_script(
         "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
         element
     )
-    time.sleep(random.uniform(0.12, 0.34))
+    random_pause(0.03, 0.07)
+
+    start_x = random.randint(-280, 280)
+    start_y = random.randint(-160, 160)
+    if abs(start_x) < 30:
+        start_x = 30 * (1 if start_x >= 0 else -1)
+
+    cp_x = start_x * random.uniform(0.2, 0.8) + random.uniform(-25, 25)
+    cp_y = start_y * random.uniform(0.2, 0.8) + random.uniform(-25, 25)
 
     actions = ActionChains(driver)
-    actions.move_to_element(element)
+    actions.move_to_element_with_offset(element, start_x, start_y)
+
+    prev_x, prev_y = float(start_x), float(start_y)
+
+    for i in range(1, steps + 1):
+        t = i / steps
+        cur_x = (1 - t) ** 2 * start_x + 2 * (1 - t) * t * cp_x + t ** 2 * 0
+        cur_y = (1 - t) ** 2 * start_y + 2 * (1 - t) * t * cp_y + t ** 2 * 0
+        cur_x += random.uniform(-1.5, 1.5)
+        cur_y += random.uniform(-1.5, 1.5)
+
+        actions.move_by_offset(int(cur_x - prev_x), int(cur_y - prev_y))
+        actions.pause(random.uniform(0.003, 0.008))
+
+        prev_x, prev_y = cur_x, cur_y
+
+    actions.perform()
+    random_pause(0.02, 0.06)
+
+
+def human_hover_and_click(driver, element, pre_click_pause=(0.08, 0.25)):
+    simulate_human_mouse_path(driver, element)
+
+    actions = ActionChains(driver)
     actions.pause(random.uniform(*pre_click_pause))
     actions.click()
     actions.perform()
@@ -434,14 +471,7 @@ def get_element_screen_center(driver, element):
 
 
 def real_mouse_click_element(driver, element, duration_range=(0.30, 0.85)):
-    x, y = get_element_screen_center(driver, element)
-    x += random.randint(-4, 4)
-    y += random.randint(-4, 4)
-
-    duration = random.uniform(*duration_range)
-    pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeInOutQuad)
-    random_pause(0.05, 0.16)
-    pyautogui.click()
+    human_hover_and_click(driver, element)
 
 def human_focus_element(driver, element, use_real_mouse=False):
     if use_real_mouse:
@@ -756,6 +786,7 @@ def wait_until_service_provider_next_enabled(driver, timeout=10):
 
     WebDriverWait(driver, timeout).until(_ready)
 
+
 def click_next(driver, timeout=10):
 
     wait = WebDriverWait(driver, timeout)
@@ -975,10 +1006,6 @@ def check_duplicate_account(driver):
     return False, None  
 
 def click_terms_checkbox(driver, timeout=20):
-
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.common.by import By
-
     wait = WebDriverWait(driver, timeout)
 
     checkbox = driver.find_element(By.ID, "applicantTermsConditionsCheckbox")
@@ -1015,6 +1042,7 @@ def click_primary_button_like_human(driver, css, timeout=20):
             driver.execute_script("arguments[0].click();", btn)
 
     random_pause(0.80, 1.80)
+
 
 def click_consumer_submit(driver, timeout=20):
 
@@ -1056,6 +1084,8 @@ def click_consumer_submit(driver, timeout=20):
         driver.execute_script("arguments[0].click();", btn)
 
     return True
+
+
 def detect_username_taken(driver):
     target_text = "The username you have selected is already in use"
 
@@ -1089,6 +1119,10 @@ def detect_username_taken(driver):
 
     return None
 
+
+# ----------------------------
+# Navigation helpers
+# ----------------------------
 
 def open_account_homepage(driver, timeout=15):
     wait = WebDriverWait(driver, timeout)
@@ -1142,10 +1176,11 @@ def recover_to_homepage(driver):
     random_pause(1.5, 3.0)
 
     print("Recovery: waiting before next lead...")
-    random_pause(1,3)
+    random_pause(1, 3)
+
 
 # ----------------------------
-# Data helpers
+# Page progress / recovery helpers
 # ----------------------------
 
 def wait_for_progress_or_force_recover(driver, timeout=20):
@@ -1197,6 +1232,11 @@ def update_status(sheet, row_number, status, note=""):
     except Exception as e:
         print(f"Could not update status for row {row_number}: {e}")
 
+
+# ----------------------------
+# Result classification / sheet helpers
+# ----------------------------
+
 def classify_submission_result(driver):
     try:
         body_text = driver.execute_script(
@@ -1224,6 +1264,12 @@ def classify_submission_result(driver):
 def should_skip_row(row):
     status = (row.get("Status") or "").strip().lower()
     return status in {"done", "submitted", "skip"}
+
+
+# ----------------------------
+# Error / condition detectors
+# ----------------------------
+
 def detect_duplicate_account(driver):
 
     target_text = "already exist in our system"
@@ -1259,24 +1305,44 @@ def detect_duplicate_account(driver):
     return None
 
 def detect_needs_more_info(driver):
-
     target = "we need more information to see if you qualify"
 
-    # 1. PRIMARY: full rendered text (most reliable in Angular)
+    reasons = []
+
+    # 1. PRIMARY: full rendered text
     try:
-        body_text = driver.find_element("tag name", "body").text.lower()
+        body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
 
         if target in body_text:
-            return "WE_NEED_MORE_INFO_TO_QUALIFY"
+            # Extract reasons from the fieldset
+            try:
+                fieldset = driver.find_element(By.CSS_SELECTOR, "fieldset.indi-form__fieldset")
+                items = fieldset.find_elements(By.CSS_SELECTOR, "li")
 
-    except:
+                for item in items:
+                    text = item.text.strip()
+                    if text:
+                        reasons.append(text)
+
+            except Exception:
+                pass
+
+            return {
+                "status": "WE_NEED_MORE_INFO_TO_QUALIFY",
+                "reasons": reasons
+            }
+
+    except Exception:
         pass
 
     # 2. SECONDARY: page source fallback
     try:
         if target in driver.page_source.lower():
-            return "WE_NEED_MORE_INFO_TO_QUALIFY"
-    except:
+            return {
+                "status": "WE_NEED_MORE_INFO_TO_QUALIFY",
+                "reasons": []
+            }
+    except Exception:
         pass
 
     return None
@@ -1290,6 +1356,7 @@ def write_column_m(sheet, row_number, value):
         value = ""
 
     sheet.update_cell(row_number, 13, str(value))
+
 
 def detect_almost_qualified(driver):
     target = "you are almost done qualifying"
@@ -1326,6 +1393,11 @@ def detect_almost_qualified(driver):
         pass
 
     return None
+
+
+# ----------------------------
+# Data normalization helpers
+# ----------------------------
 
 def clean(v):
     if isinstance(v, dict):
@@ -1383,9 +1455,11 @@ def split_dob(dob_value):
 
     return month, day, year
 
-import time
-import random
-from selenium.common.exceptions import StaleElementReferenceException
+
+# ----------------------------
+# Application page actions
+# ----------------------------
+
 def click_start_lifeline_application(driver, timeout=30):
     print("Clicking Start Lifeline Application...")
 
@@ -1405,13 +1479,15 @@ def click_start_lifeline_application(driver, timeout=30):
         except Exception:
             driver.execute_script("arguments[0].click();", btn)
 
-    random_pause(0.8, 1.6)
+    random_pause(0.2, 1)
+
 
 def extract_username_from_email(email):
     email = (email or "").strip()
     if "@" in email:
         return email.split("@")[0]
     return email
+
 
 def fill_create_account_page(driver, row):
     wait_for_dom_ready(driver, timeout=30)
@@ -1460,7 +1536,7 @@ def fill_create_account_page(driver, row):
     print("Clicking agreement checkbox...")
     click_terms_checkbox(driver)
 
-    random_pause(0.6, 1.4)
+    random_pause(0.6, 1)
     if not click_consumer_submit(driver, timeout=20):
         return False, "consumer next failed"
 
@@ -1530,6 +1606,8 @@ def wait_for_loader_or_timeout(driver, timeout=20):
             print(f"Refresh error: {e}")
 
     return False
+
+
 def sign_out_account(driver, timeout=20):
     wait = WebDriverWait(driver, timeout)
 
@@ -1573,7 +1651,8 @@ def sign_out_account(driver, timeout=20):
     except TimeoutException:
         print("Could not find 'Sign out' option")
         return False
-    
+
+
 def start_browser():
     sb = SB(
         uc=True,
@@ -1586,6 +1665,7 @@ def start_browser():
     driver.set_page_load_timeout(25)
 
     return sb, driver
+
 
 def click_consumer_next(driver):
 
@@ -1615,7 +1695,6 @@ def click_consumer_next(driver):
             return False
 
     # wait until Angular actually makes it active
-    from selenium.webdriver.support.ui import WebDriverWait
     WebDriverWait(driver, 15).until(is_ready)
 
     btn = driver.find_element(By.ID, "consumerNextSuccessButton")
@@ -1851,14 +1930,15 @@ def fill_form_from_row(driver, row, sheet, row_number):
     print("Checking for invalid fields...")
     print_invalid_fields(driver)
 
-    angular_safe_click(
-    driver,
-    (By.ID, "consumerNextSuccessButton"),
-    timeout=15,
-    text="Next"
-)
-
+    # Capture URL before clicking so we can detect navigation afterward
     before_url = driver.current_url
+
+    angular_safe_click(
+        driver,
+        (By.ID, "consumerNextSuccessButton"),
+        timeout=15,
+        text="Next"
+    )
 
     print("Clicking first Next...")
 
@@ -1887,9 +1967,8 @@ def fill_form_from_row(driver, row, sheet, row_number):
     username_status = detect_username_taken(driver)
     
     if username_status == "USERNAME_TAKEN":
-        # Log the status in the sheet and skip to next lead
         print("Username already taken, skipping lead.")
-        write_column_m(row_number, 13, username_status)
+        write_column_m(sheet, row_number, username_status)
         return False, "NEXT_LEAD"
 
 
@@ -1911,7 +1990,7 @@ def fill_form_from_row(driver, row, sheet, row_number):
     click_checkbox_like_human(driver, "#eligSnapSpan", timeout=20)
 
     # simulate reading eligibility text
-    time.sleep(random.uniform(1.5, 3.5))
+    time.sleep(random.uniform(1, 2))
 
     # ----------------------------
     # Gov program Next
@@ -1922,7 +2001,7 @@ def fill_form_from_row(driver, row, sheet, row_number):
     # ----------------------------
     # Agreement checkbox
     # ----------------------------
-    time.sleep(random.uniform(2, 8))
+    time.sleep(random.uniform(2,4))
     solver = RecaptchaSolver(driver)
 
     try:
@@ -1935,12 +2014,12 @@ def fill_form_from_row(driver, row, sheet, row_number):
     print("Captcha completed, continuing...")
 
     human_behavior()
-    time.sleep(random.uniform(1,3))
+    time.sleep(random.uniform(.5,1.5))
     driver.execute_script("window.scrollBy(0, 200);")
     click_checkbox_like_human(driver, "span.indi-form__checkbox-icon", timeout=20)
 
     # simulate reading terms
-    time.sleep(random.uniform(1,3))
+    time.sleep(random.uniform(1,2))
 
     # ----------------------------
     # Submit
@@ -1976,7 +2055,7 @@ def fill_form_from_row(driver, row, sheet, row_number):
     # ----------------------------
     sign_out_account(driver)
 
-    time.sleep(random.uniform(4,6))
+    time.sleep(random.uniform(1,2))
 
     return True
 
@@ -2038,8 +2117,7 @@ def process_rows():
         except Exception as e:
             print(f"Fatal error on row {row_number}: {e}")
 
-        wait_before_next_lead(10, 20)
+        wait_before_next_lead(7, 15)
 
 if __name__ == "__main__":
     process_rows()
-
