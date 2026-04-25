@@ -42,7 +42,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
 SERVICE_ACCOUNT_FILE = "service_account.json"
-SPREADSHEET_ID = "1r1zErE49Fz3G_w2eej5__NPePnbeW384JGPxPAo6iDA"
+SPREADSHEET_ID = "1QbfUCSC_5DFKp58F0kGNre7Lr4EzXNXCo_s5pKUGJRw"
 WORKSHEET_NAME = "Sheet1"
 
 STATUS_COL = 11   # K
@@ -97,12 +97,23 @@ class RecaptchaSolver:
     def solveAudioCaptcha(self):
         try:
             self.driver.switch_to.default_content()
-            
+
             # Switch to the audio CAPTCHA iframe
             iframe_audio = WebDriverWait(self.driver, 10).until(
                 EC.frame_to_be_available_and_switch_to_it((By.XPATH, '//iframe[@title="recaptcha challenge expires in two minutes"]'))
             )
             random_pause(.5,.7)
+
+            # Detect "Try again later" block before attempting audio solve.
+            # This appears when Google has flagged the IP for automation.
+            try:
+                body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+                if "try again later" in body_text:
+                    raise Exception("RECAPTCHA_IP_BLOCKED")
+            except Exception as e:
+                if "RECAPTCHA_IP_BLOCKED" in str(e):
+                    raise
+
             # Click on the audio button
             audio_button = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, 'recaptcha-audio-button'))
@@ -1832,69 +1843,68 @@ def fill_form_from_row(driver, row, sheet, row_number):
     # Start application
     # ----------------------------
 
-    
-
-    # Block all WebSocket connections on the page at the JS level.
-    # The fake immediately fires onerror + onclose so ServiceNow stops
-    # waiting and falls back to HTTP polling instead of hanging.
+    # The server rejects the WebSocket upgrade for automation browsers, so
+    # ServiceNow's AMB always falls back to long-polling. Long-polling takes
+    # ~1-2 s to complete its channel handshake, but /api/now/sp/rectangle/
+    # fires immediately → 428. The fix: intercept console output to detect
+    # AMB's "Connected using transport" message, then hold the rectangle
+    # XHR until that signal arrives (6 s hard fallback).
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": """
-            (function() {
-                const _WS = window.WebSocket;
-                function FakeWebSocket(url, protocols) {
-                    this.url = url;
-                    this.readyState = 3;
-                    this.onopen = null;
-                    this.onclose = null;
-                    this.onerror = null;
-                    this.onmessage = null;
-                    const self = this;
-                    setTimeout(function() {
-                        const err = new Event('error');
-                        if (self.onerror) self.onerror(err);
-                        const cls = new CloseEvent('close', { code: 1006, reason: 'blocked', wasClean: false });
-                        if (self.onclose) self.onclose(cls);
-                    }, 0);
+        (function() {
+            var ambReady = false;
+
+            ['log', 'info', 'debug', 'warn'].forEach(function(m) {
+                var o = console[m];
+                console[m] = function() {
+                    try {
+                        if (('' + arguments[0]).indexOf('Connected using transport') >= 0) {
+                            ambReady = true;
+                        }
+                    } catch(e) {}
+                    return o.apply(console, arguments);
+                };
+            });
+
+            var _open = XMLHttpRequest.prototype.open;
+            var _send = XMLHttpRequest.prototype.send;
+
+            XMLHttpRequest.prototype.open = function(method, url) {
+                this._xUrl = (url || '') + '';
+                return _open.apply(this, arguments);
+            };
+
+            XMLHttpRequest.prototype.send = function(body) {
+                if (this._xUrl.indexOf('/api/now/sp/rectangle/') >= 0) {
+                    var self = this;
+                    var ms = 0;
+                    var wait = function() {
+                        if (ambReady || ms >= 6000) {
+                            _send.call(self, body);
+                        } else {
+                            ms += 150;
+                            setTimeout(wait, 150);
+                        }
+                    };
+                    wait();
+                } else {
+                    _send.call(this, body);
                 }
-                FakeWebSocket.prototype.send = function() {};
-                FakeWebSocket.prototype.close = function() {};
-                FakeWebSocket.prototype.addEventListener = function() {};
-                FakeWebSocket.prototype.removeEventListener = function() {};
-                FakeWebSocket.CONNECTING = 0;
-                FakeWebSocket.OPEN      = 1;
-                FakeWebSocket.CLOSING   = 2;
-                FakeWebSocket.CLOSED    = 3;
-                window.WebSocket = FakeWebSocket;
-                console.log('[WS blocked] WebSocket replaced with FakeWebSocket');
-            })();
+            };
+        })();
         """
     })
 
-    # Also block at the network level so the TCP handshake never starts.
-    try:
-        driver.execute_cdp_cmd("Network.enable", {})
-        driver.execute_cdp_cmd("Network.setBlockedURLs", {
-            "urls": ["wss://*", "ws://*"]
-        })
-    except Exception:
-        pass
-
-    #navigate to website
-    driver.get("https://www.getinternet.gov/apply?id=nv_flow&ln=RW5nbGlzaA%3D%3D")
-    wait_for_dom_ready(driver, timeout=30)
-    random_pause(1.0, 2.0)
     driver.get("https://www.getinternet.gov/apply?id=nv_flow&ln=RW5nbGlzaA%3D%3D")
     wait_for_dom_ready(driver, timeout=30)
 
-    # Wait for ServiceNow session to establish before touching the form.
-    # The 428 on /api/now/sp/rectangle means the session token isn't ready yet.
     WebDriverWait(driver, 30).until(
         lambda d: d.execute_script("""
             return typeof window.NOW !== 'undefined' &&
                    document.querySelector('#firstName') !== null;
         """)
     )
-    random_pause(5,10)
+    random_pause(5, 10)
 
     
 
@@ -2020,6 +2030,10 @@ def fill_form_from_row(driver, row, sheet, row_number):
         solver.solveCaptcha()
         print("Captcha handling finished")
     except Exception as e:
+        if "RECAPTCHA_IP_BLOCKED" in str(e):
+            print("reCAPTCHA IP blocked — skipping lead.")
+            update_status(sheet, row_number, "CAPTCHA_BLOCKED", "IP flagged by Google")
+            return False, "NEXT_LEAD"
         print("Captcha failed:", e)
 
     #create an account page
@@ -2074,6 +2088,10 @@ def fill_form_from_row(driver, row, sheet, row_number):
         solver.solveCaptcha()
         print("Captcha handling finished")
     except Exception as e:
+        if "RECAPTCHA_IP_BLOCKED" in str(e):
+            print("reCAPTCHA IP blocked — skipping lead.")
+            update_status(sheet, row_number, "CAPTCHA_BLOCKED", "IP flagged by Google")
+            return False, "NEXT_LEAD"
         print("Captcha failed:", e)
 
     print("Captcha completed, continuing...")
@@ -2182,7 +2200,7 @@ def process_rows():
         except Exception as e:
             print(f"Fatal error on row {row_number}: {e}")
 
-        wait_before_next_lead(7, 15)
+        wait_before_next_lead(20, 30)
 
 if __name__ == "__main__":
     process_rows()
