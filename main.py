@@ -42,7 +42,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
 SERVICE_ACCOUNT_FILE = "service_account.json"
-SPREADSHEET_ID = "1baMJ0sLCQphUdZzETLsqcYOqlgK5P5WK4bRCiP1WLjA"
+SPREADSHEET_ID = "1r1zErE49Fz3G_w2eej5__NPePnbeW384JGPxPAo6iDA"
 WORKSHEET_NAME = "Sheet1"
 
 STATUS_COL = 11   # K
@@ -56,8 +56,15 @@ class RecaptchaSolver:
         self.driver = driver
 
     async def download_audio(self, url, path):
-        async with aiohttp.ClientSession() as session:
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://www.google.com/",
+            "Origin": "https://www.google.com",
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url) as response:
+                if response.status != 200:
+                    raise Exception(f"Audio download failed: HTTP {response.status}")
                 with open(path, 'wb') as f:
                     f.write(await response.read())
         print("Downloaded audio asynchronously.")
@@ -1662,7 +1669,7 @@ def start_browser():
     )
 
     driver = sb.driver
-    driver.set_page_load_timeout(25)
+    driver.set_page_load_timeout(60)
 
     return sb, driver
 
@@ -1827,9 +1834,67 @@ def fill_form_from_row(driver, row, sheet, row_number):
 
     
 
+    # Block all WebSocket connections on the page at the JS level.
+    # The fake immediately fires onerror + onclose so ServiceNow stops
+    # waiting and falls back to HTTP polling instead of hanging.
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            (function() {
+                const _WS = window.WebSocket;
+                function FakeWebSocket(url, protocols) {
+                    this.url = url;
+                    this.readyState = 3;
+                    this.onopen = null;
+                    this.onclose = null;
+                    this.onerror = null;
+                    this.onmessage = null;
+                    const self = this;
+                    setTimeout(function() {
+                        const err = new Event('error');
+                        if (self.onerror) self.onerror(err);
+                        const cls = new CloseEvent('close', { code: 1006, reason: 'blocked', wasClean: false });
+                        if (self.onclose) self.onclose(cls);
+                    }, 0);
+                }
+                FakeWebSocket.prototype.send = function() {};
+                FakeWebSocket.prototype.close = function() {};
+                FakeWebSocket.prototype.addEventListener = function() {};
+                FakeWebSocket.prototype.removeEventListener = function() {};
+                FakeWebSocket.CONNECTING = 0;
+                FakeWebSocket.OPEN      = 1;
+                FakeWebSocket.CLOSING   = 2;
+                FakeWebSocket.CLOSED    = 3;
+                window.WebSocket = FakeWebSocket;
+                console.log('[WS blocked] WebSocket replaced with FakeWebSocket');
+            })();
+        """
+    })
+
+    # Also block at the network level so the TCP handshake never starts.
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+        driver.execute_cdp_cmd("Network.setBlockedURLs", {
+            "urls": ["wss://*", "ws://*"]
+        })
+    except Exception:
+        pass
+
     #navigate to website
     driver.get("https://www.getinternet.gov/apply?id=nv_flow&ln=RW5nbGlzaA%3D%3D")
     wait_for_dom_ready(driver, timeout=30)
+    random_pause(1.0, 2.0)
+    driver.get("https://www.getinternet.gov/apply?id=nv_flow&ln=RW5nbGlzaA%3D%3D")
+    wait_for_dom_ready(driver, timeout=30)
+
+    # Wait for ServiceNow session to establish before touching the form.
+    # The 428 on /api/now/sp/rectangle means the session token isn't ready yet.
+    WebDriverWait(driver, 30).until(
+        lambda d: d.execute_script("""
+            return typeof window.NOW !== 'undefined' &&
+                   document.querySelector('#firstName') !== null;
+        """)
+    )
+    random_pause(5,10)
 
     
 
